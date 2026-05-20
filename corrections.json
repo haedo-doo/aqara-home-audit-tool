@@ -1,0 +1,57 @@
+{
+  "_doc": "韩文翻译修改追踪 + 已批准词典。每次 audit 前手工 / 工具更新 status。",
+  "_schema": {
+    "id":           "唯一 ID(自由格式,建议 c001/c002 之类)",
+    "wrong":        "原始错误韩文(必填)",
+    "fix":          "你建议 / 已提交的修改版本(必填)",
+    "device_hint":  "可选 — 限定哪台设备(便于过滤,目前未严格强制)",
+    "path_hint":    "可选 — 限定哪个菜单路径",
+    "submitted_at": "提交开发的日期 YYYY-MM-DD",
+    "status":       "pending / verified / regressed / removed — 脚本会更新 last_seen 但不会自动改 status,你手工 review 后改"
+  },
+  "_status_meaning": {
+    "pending":   "已提交开发但尚未在 app 看到修改",
+    "verified":  "下次 audit wrong 消失 + fix 出现 → 用户手工标 verified",
+    "regressed": "曾 verified,后续 audit wrong 又出现 → 开发回滚了 / 翻译跑掉了",
+    "removed":   "wrong 和 fix 在 app 里都不见了(可能菜单被删) — 视情况处理",
+    "ignored":   "既成事实,用户决定保留(用了很久不能动 / AI 建议不可行)。永不送 AI,不出 finding。fix 字段写理由即可"
+  },
+  "corrections": [
+    {
+      "id": "c001",
+      "wrong": "움직임명 인식됨",
+      "fix": "움직임이 감지됨",
+      "device_hint": "G2H Pro",
+      "path_hint": null,
+      "submitted_at": "2026-05-15",
+      "status": "pending"
+    },
+    {
+      "id": "i001",
+      "wrong": "동시실행",
+      "fix": "(legacy: 长期使用,不改)",
+      "device_hint": null,
+      "path_hint": null,
+      "submitted_at": "2026-05-19",
+      "status": "ignored"
+    },
+    {
+      "id": "i002",
+      "wrong": "관련 자동실행, 동시실행 등",
+      "fix": "(legacy: 同 i001 上下文)",
+      "device_hint": null,
+      "path_hint": null,
+      "submitted_at": "2026-05-19",
+      "status": "ignored"
+    },
+    {
+      "id": "i003",
+      "wrong": "하위 장치 삭제 방지",
+      "fix": "(legacy: 长期使用术语,不改)",
+      "device_hint": null,
+      "path_hint": null,
+      "submitted_at": "2026-05-19",
+      "status": "ignored"
+    }
+  ]
+}

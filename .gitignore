@@ -1,0 +1,43 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.venv/
+venv/
+
+# --- 환경 변수 / 시크릿 (절대 커밋 금지) ---
+.env
+.env.*
+*.key
+*api_key*
+*secret*
+
+# --- 스캔 산출물 (자동 생성, 용량 큼, 매 실행마다 새로 생김) ---
+output/
+*.png
+*.xml
+!sample_*.png
+!sample_*.xml
+
+# --- 도구가 생성하는 백업 / 임시 파일 ---
+*.bak
+corrections.json.bak
+audit_run.log
+*.log
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Claude Code 내부 설정 (사용자별, 공유 X) ---
+.claude/
+
+# --- 임시 ---
+tmp/
+temp/
+*.tmp

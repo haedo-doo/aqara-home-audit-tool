@@ -1,0 +1,15 @@
+# Aqara Home 韩文 audit — Python 의존성
+# Python 3.13+ 권장
+
+# --- Phase 2 (Android UI 스캔) ---
+uiautomator2>=3.0
+lxml>=5.0
+
+# --- Phase 3 AI audit ---
+# Gemini (구글 AI Studio,추천)
+google-genai>=0.3
+# Anthropic (선택 — Claude 사용 시)
+anthropic>=0.40
+
+# --- 공통 (구조화 출력 검증) ---
+pydantic>=2.0
