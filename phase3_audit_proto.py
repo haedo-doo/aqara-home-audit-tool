@@ -1130,7 +1130,8 @@ def _audit_one_device(device_data, run_dir, device_index, total, state: _Provide
     }
 
 
-def audit_run(run_dir: Path, baseline_zh: Path = None, baseline_en: Path = None):
+def audit_run(run_dir: Path, baseline_zh: Path = None, baseline_en: Path = None,
+              reuse_findings: Path = None):
     """检测 run dir 是单设备还是多设备,跑相应的 audit。
     输出统一 schema:顶层 `devices` 数组,单设备就是长度 1。
     向后兼容:单设备 case 顶层也复制第一台的字段。
@@ -1176,6 +1177,22 @@ def audit_run(run_dir: Path, baseline_zh: Path = None, baseline_en: Path = None)
               f"({len(approved_fixes)} verified → 词典,"
               f"{len(ignored_texts)} ignored → 永不审)", flush=True)
 
+    # ★ 2026-05-21 reuse cache:从旧 findings.json 加载已审过的设备 → 跳过 AI
+    reuse_cache = {}
+    if reuse_findings:
+        rp = Path(reuse_findings) if not isinstance(reuse_findings, Path) else reuse_findings
+        if rp.exists():
+            try:
+                old = json.loads(rp.read_text(encoding="utf-8"))
+                for d in old.get("devices", []):
+                    label = d.get("device_label")
+                    if label:
+                        reuse_cache[label] = d
+                print(f"\n[reuse] loaded {len(reuse_cache)} cached devices from {rp.name} "
+                      f"→ will skip AI for matching device_labels", flush=True)
+            except Exception as e:
+                print(f"\n[reuse] failed to load {rp}: {e}", flush=True)
+
     state = _ProviderState()
     device_outputs = []
     for idx, dd in enumerate(device_list):
@@ -1185,6 +1202,18 @@ def audit_run(run_dir: Path, baseline_zh: Path = None, baseline_en: Path = None)
         if not dd.get("trees"):
             print(f"\n[SKIP] device {idx+1} has no trees", flush=True)
             continue
+
+        # ★ 2026-05-21:reuse cached findings 跳过 AI(节省费用 + 时间)
+        device_label = dd.get("device_name") or extract_device_label(dd, run_dir)
+        if device_label in reuse_cache:
+            cached = dict(reuse_cache[device_label])  # shallow copy
+            cached["_reused_from_cache"] = True
+            device_outputs.append(cached)
+            fc = cached.get("summary", {}).get("findings_count", 0)
+            print(f"\n[REUSE] [{idx+1}/{len(device_list)}] {device_label} — "
+                  f"cached findings ({fc} items, no AI call) ✓", flush=True)
+            continue
+
         try:
             device_outputs.append(_audit_one_device(
                 dd, run_dir, idx, len(device_list), state, is_multi,
@@ -1520,16 +1549,20 @@ if __name__ == "__main__":
                         help="可选:中文 scan run dir(对齐基线)")
     parser.add_argument("--baseline-en", default=None,
                         help="可选:英文 scan run dir(对齐基线)")
+    parser.add_argument("--reuse-findings", default=None,
+                        help="可选:旧 findings.json 路径 — 已审过的设备(按 device_label 匹配)跳过 AI 复用")
     args = parser.parse_args()
 
     run = Path(args.run_dir) if args.run_dir else find_latest_run()
     zh_run = Path(args.baseline_zh) if args.baseline_zh else None
     en_run = Path(args.baseline_en) if args.baseline_en else None
+    reuse_path = Path(args.reuse_findings) if args.reuse_findings else None
     print(f"Auditing: {run}")
     if zh_run: print(f"  baseline zh: {zh_run}")
     if en_run: print(f"  baseline en: {en_run}")
+    if reuse_path: print(f"  reuse findings: {reuse_path}")
     print()
-    output = audit_run(run, baseline_zh=zh_run, baseline_en=en_run)
+    output = audit_run(run, baseline_zh=zh_run, baseline_en=en_run, reuse_findings=reuse_path)
     json_path, html_path = write_outputs(output, run)
 
     print()

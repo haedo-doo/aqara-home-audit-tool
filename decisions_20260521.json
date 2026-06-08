@@ -1,0 +1,18 @@
+[
+  {
+    "wrong": "자동실행 (0)",
+    "fix": "(legacy: keep as-is)",
+    "status": "ignored",
+    "device_hint": "열림 감지 센서 T1",
+    "path_hint": "장치 연관 항목",
+    "submitted_at": "2026-05-21"
+  },
+  {
+    "wrong": "동시실행 (0)",
+    "fix": "(legacy: keep as-is)",
+    "status": "ignored",
+    "device_hint": "열림 감지 센서 T1",
+    "path_hint": "장치 연관 항목",
+    "submitted_at": "2026-05-21"
+  }
+]

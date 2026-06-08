@@ -49,38 +49,284 @@ def safe_name(s):
     return re.sub(r"_+", "_", s).strip("_")[:60] or "unnamed"
 
 
+# def annotate_screenshots(device_data, run_dir, device_safe=None):
+#     """给 device_data["trees"][*]["items"][*] 加 _screenshot / _faq_screenshots 字段。
+#     多设备模式下,sub-page 截图可能多设备共享同一文件名(phase2 已知问题),取 disk 上存在的那个。"""
+#     available = {p.name for p in run_dir.glob("*.png")}
+
+#     def attach(item):
+#         if item.get("status") not in ("captured", "captured_chooser"):
+#             return
+#         path = item.get("path", "")
+#         # 候选文件名:多设备模式下优先 <device_safe>_<safename> 这种(将来 phase2 fix 后会出现),
+#         # 没有就 fallback <safename>(当前 phase2 行为)
+#         candidates = []
+#         last_seg = path.split(" > ")[-1] if " > " in path else path
+#         sn_path = safe_name(path)
+#         sn_last = safe_name(last_seg)
+#         if device_safe:
+#             candidates.append(f"{device_safe}_{sn_path}.png")
+#             candidates.append(f"{device_safe}_{sn_last}.png")
+#         candidates.append(f"{sn_path}.png")
+#         candidates.append(f"{sn_last}.png")
+#         for c in candidates:
+#             if c in available:
+#                 item["_screenshot"] = c
+#                 base = c[:-4]
+#                 faq = sorted(p for p in available if p.startswith(f"{base}__q") and p.endswith(".png"))
+#                 if faq:
+#                     item["_faq_screenshots"] = faq
+#                 return
+
+#     for tree in device_data.get("trees", []):
+#         for it in tree.get("items", []):
+#             attach(it)
 def annotate_screenshots(device_data, run_dir, device_safe=None):
-    """给 device_data["trees"][*]["items"][*] 加 _screenshot / _faq_screenshots 字段。
-    多设备模式下,sub-page 截图可能多设备共享同一文件名(phase2 已知问题),取 disk 上存在的那个。"""
+    """
+    已修复：全面支持 1-4 depth 的各种自定义 captured_* 状态
+    以及解决超长文件名被 [:60] 截断导致的图片匹配失败问题
+    """
+    # 获取磁盘上所有真实存在的 png 文件名
     available = {p.name for p in run_dir.glob("*.png")}
 
     def attach(item):
-        if item.get("status") not in ("captured", "captured_chooser"):
+        status = item.get("status", "")
+        # 【修复 1】：放开拦截，允许所有以 captured 开头的扫描状态进入报告
+        if not (status.startswith("captured") or status == "captured_chooser"):
             return
+            
         path = item.get("path", "")
-        # 候选文件名:多设备模式下优先 <device_safe>_<safename> 这种(将来 phase2 fix 后会出现),
-        # 没有就 fallback <safename>(当前 phase2 行为)
         candidates = []
         last_seg = path.split(" > ")[-1] if " > " in path else path
+        
         sn_path = safe_name(path)
         sn_last = safe_name(last_seg)
+        
+        # 【修复 2】：加入多种备选匹配逻辑，防止 Phase 2 因为不同长度截断导致找不到图
         if device_safe:
             candidates.append(f"{device_safe}_{sn_path}.png")
             candidates.append(f"{device_safe}_{sn_last}.png")
         candidates.append(f"{sn_path}.png")
         candidates.append(f"{sn_last}.png")
+        
+        # 【修复 3】：模糊匹配（如果是长文件名，且磁盘上有以该片段开头或包含该片段的图片）
+        # 优先精准匹配
         for c in candidates:
             if c in available:
                 item["_screenshot"] = c
-                base = c[:-4]
-                faq = sorted(p for p in available if p.startswith(f"{base}__q") and p.endswith(".png"))
-                if faq:
-                    item["_faq_screenshots"] = faq
+                _attach_faq(item, c, available)
                 return
+                
+        # 如果精准匹配没找到，尝试进行长文件名截断前缀匹配
+        short_sn_path = sn_path[:40] # 取前40个字符作为核心特征进行搜索
+        for f_name in available:
+            if short_sn_path in f_name and f_name.endswith(".png"):
+                item["_screenshot"] = f_name
+                _attach_faq(item, f_name, available)
+                return
+
+    def _attach_faq(item, img_name, available_set):
+        base = img_name[:-4]
+        faq = sorted(p for p in available_set if p.startswith(f"{base}__q") and p.endswith(".png"))
+        if faq:
+            item["_faq_screenshots"] = faq
+        # ★ 2026-05-26(case #51):traverse_related_items 滚动多帧抓取产生 __scroll_f{N}.png
+        # 之前 annotate 没识别,viewer 看不到 → 翻译审计漏。现在挂上,后面 JS 渲染时显示
+        scrolls = sorted(p for p in available_set if p.startswith(f"{base}__scroll_f") and p.endswith(".png"))
+        if scrolls:
+            item["_scroll_screenshots"] = scrolls
 
     for tree in device_data.get("trees", []):
         for it in tree.get("items", []):
             attach(it)
+
+
+def _extract_page_header(xml_path: Path):
+    """★ 2026-05-27(case #62):从 sub-page 的 XML 提取页面顶部居中的 header 文本。
+    用于 viewer 检测 title-mismatch — Phase 2 click intent 跟实际 page 不符时(RN dump
+    含父页 ghost items → upfront discovery 误收 → click stale bounds → 跳错页),
+    通过 header 对比可以发现。
+
+    Header 判定:
+    - y1 < 250 (顶部状态栏下方,header bar 区域)
+    - 高度 30-200 px (典型 header text size)
+    - cx 居中(400-700 for 1080-wide screen,排除左边返回箭头 / 右边图标)
+    - 文本长度 2-40
+    - 排除时间(`9:43`)/电量(`100%`)等 status bar 噪音
+
+    返回 header text 或 None。
+    """
+    if not xml_path.exists():
+        return None
+    try:
+        content = xml_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return None
+    candidates = []
+    for line in content.split("<node"):
+        if "package=\"com.lumiunited" not in line:
+            continue
+        mb = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', line)
+        if not mb:
+            continue
+        x1, y1, x2, y2 = map(int, mb.groups())
+        if y1 > 250 or (y2 - y1) < 30 or (y2 - y1) > 200:
+            continue
+        cx = (x1 + x2) // 2
+        if cx < 400 or cx > 700:
+            continue
+        mt = re.search(r'text="([^"]+)"', line)
+        if not mt:
+            continue
+        t = mt.group(1).strip()
+        if not t or len(t) < 2 or len(t) > 40:
+            continue
+        # 排除 status bar 噪音
+        if t.endswith("%") or re.match(r"^\d+:\d+$", t):
+            continue
+        candidates.append((y1, cx, t))
+    if not candidates:
+        return None
+    # 最靠上 + 最靠中心
+    candidates.sort(key=lambda c: (c[0], abs(c[1] - 540)))
+    return candidates[0][2]
+
+
+def _has_common_korean_bigram(a, b):
+    """两个字符串是否共享 2 个连续韩文字符。用于判断 path 与 header 是否同一概念。
+    例:'트리거 조건 추가' vs '트리거 조건 선택' 共享 '트리','리거','조건' → True (功能上一致)。
+    例:'일회용 비밀번호' vs '원격 기능' 共享 0 个 → False (是 mismatch)。"""
+    def bigrams(s):
+        out = set()
+        for i in range(len(s) - 1):
+            c1, c2 = s[i], s[i+1]
+            if '가' <= c1 <= '힣' and '가' <= c2 <= '힣':
+                out.add(c1 + c2)
+        return out
+    return bool(bigrams(a) & bigrams(b))
+
+
+# 已知 page header,代表 expected pattern,不算 mismatch:
+# - 장치 정보:case #46 device-info card click 的标准 header
+# - 〜 선택:case #55 related-items '추가' 按钮跳的"选择"页 header
+_EXPECTED_HEADER_PATTERNS = {
+    "장치 정보", "Device Info", "设备信息",
+}
+
+
+def _check_title_mismatch(item, run_dir):
+    """对比 item.path 最后一段 与 截图 XML 提取的 page header。
+    Mismatch → 标 `_title_mismatch = True`, 存 `_page_header`。
+
+    豁免规则(避免误报):
+    1. 完全相等 / 一方是另一方 substring → 同概念
+    2. 共享 2 连续韩文字符 → 同主题(如"트리거 조건 추가" vs "트리거 조건 선택")
+    3. header 是已知 expected pattern(장치 정보 / 各种 선택 页)→ device-info / related-items 标准模式
+    """
+    screenshot = item.get("_screenshot")
+    if not screenshot:
+        return
+    xml_name = screenshot[:-4] + ".xml"
+    xml_path = run_dir / xml_name
+    header = _extract_page_header(xml_path)
+    if not header:
+        return
+    item["_page_header"] = header
+    path = item.get("path", "")
+    last_seg = path.split(" > ")[-1] if " > " in path else path
+    if last_seg.startswith("[desc]"):
+        last_seg = last_seg[6:]
+    last_seg = last_seg.strip()
+    if not last_seg:
+        return
+    # 豁免规则
+    if header == last_seg:
+        return
+    if last_seg in header or header in last_seg:
+        return
+    if header in _EXPECTED_HEADER_PATTERNS:
+        return
+    # case #55 pattern: 'X 추가' click → 'Y 선택' page (related-items 流程)
+    if last_seg.endswith("추가") and header.endswith("선택"):
+        return
+    # 共享 2 连续韩文字符 = 同主题
+    if _has_common_korean_bigram(last_seg, header):
+        return
+    item["_title_mismatch"] = True
+
+
+def _dedup_inherited_texts(device_data):
+    """★ 2026-05-27(case #61 viewer-side):RN sub-page dump 含父页/兄弟页 "幽灵" 文本(case #59 KNOWN ISSUE)。
+    Viewer 侧 dedup,**双策略**:
+    1. **祖先 path dedup**:减去所有祖先 path 的 app_texts (eg 'Matter > 페어링 코드 > QR코드 저장' 减去 'Matter' 和 'Matter > 페어링 코드' 的 texts)
+    2. **兄弟频率 dedup**:同 tree 内 ≥ 阈值数量的兄弟 item 共享的 text = backdrop (RN settings page items 漏到每个 sub-page),从每个 item 减去
+
+    `app_texts` 原值不动 → JS toggle 可切换显示。
+    """
+    for tree in device_data.get("trees", []):
+        items_in_tree = tree.get("items", [])
+
+        # === 第 1 遍:按 path 收集 text set + 全局 text frequency ===
+        path_to_text_set = {}
+        text_frequency = {}   # text -> 在多少 items 出现
+        items_with_texts = 0
+        for it in items_in_tree:
+            p = it.get("path") or ""
+            ats = it.get("app_texts") or []
+            if not ats:
+                continue
+            items_with_texts += 1
+            text_set = set()
+            for t in ats:
+                tv = (t.get("text") or t.get("content_desc") or "").strip()
+                if tv:
+                    text_set.add(tv)
+            path_to_text_set.setdefault(p, set()).update(text_set)
+            # 同一 item 内重复不算多次
+            for tv in text_set:
+                text_frequency[tv] = text_frequency.get(tv, 0) + 1
+
+        # 兄弟频率 dedup:出现在 >= threshold 个 items 的 text 算 backdrop(RN 设置页 items 漏到各 sub-page)。
+        # 实测 M3 hub Phase B 21 items, RN leak items 通常出现在 4 个 items 里(~19% 频率)。
+        # 50% 阈值漏抓所有,改成 max(4, items//5):20% 频率 + 最少 4 出现。
+        # 守卫:items >= 8 才启用(小 tree 频率不可靠,易把 legit shared text 当 backdrop)。
+        sibling_backdrop = set()
+        if items_with_texts >= 8:
+            threshold = max(4, items_with_texts // 5)
+            sibling_backdrop = {tv for tv, n in text_frequency.items() if n >= threshold}
+
+        # === 第 2 遍:每个 item 计算 dedup ===
+        for it in items_in_tree:
+            p = it.get("path") or ""
+            ats = it.get("app_texts") or []
+            if not ats:
+                continue
+
+            # 祖先 path texts
+            ancestor_texts = set()
+            if p:
+                parts = p.split(" > ")
+                for end in range(1, len(parts)):
+                    anc_path = " > ".join(parts[:end])
+                    if anc_path in path_to_text_set:
+                        ancestor_texts.update(path_to_text_set[anc_path])
+
+            # 合并两个 dedup 来源
+            to_hide = ancestor_texts | sibling_backdrop
+
+            if not to_hide:
+                it["_dedup_texts"] = ats
+                it["_hidden_count"] = 0
+                continue
+
+            dedup_list = []
+            for t in ats:
+                tv = (t.get("text") or t.get("content_desc") or "").strip()
+                if tv and tv in to_hide:
+                    continue
+                dedup_list.append(t)
+            it["_dedup_texts"] = dedup_list
+            it["_hidden_count"] = len(ats) - len(dedup_list)
 
 
 def _scan_file_for(pattern, path: Path):
@@ -180,6 +426,11 @@ def collect_devices(run_dir):
             label = extract_device_label_fallback(dd, run_dir, safe_name(dd.get("device_name") or "") if is_multi else None)
         ds = safe_name(label) if is_multi else None
         annotate_screenshots(dd, run_dir, ds)
+        _dedup_inherited_texts(dd)   # ★ case #61: 计算 _dedup_texts / _hidden_count
+        # ★ case #62: 对每个 item 检查 title-mismatch
+        for tree in dd.get("trees", []):
+            for it in tree.get("items", []):
+                _check_title_mismatch(it, run_dir)
         plugin_main, plugin_settings, firmware = extract_versions(dd, run_dir, ds)
 
         device_findings = []
@@ -375,6 +626,7 @@ __TABS_HTML__
   <label><input type="checkbox" class="status-filter" value="captured"> captured</label>
   <label><input type="checkbox" class="status-filter" value="vanished"> vanished</label>
   <label><input type="checkbox" class="status-filter" value="skipped"> skipped</label>
+  <label><input type="checkbox" id="show-all-duplicates"> show all (incl. inherited duplicates)</label>
   <label style="margin-left:auto"><input type="checkbox" id="only-with-findings"> only items with findings ⚠</label>
 </div>
 
@@ -631,7 +883,8 @@ function renderItem(item) {
   const last = path.includes(" > ") ? path.split(" > ").pop() : path;
   const parents = path.includes(" > ") ? path.substring(0, path.lastIndexOf(" > ") + 3) : "";
 
-  const hasDetails = ["captured", "captured_chooser"].includes(item.status);
+  //const hasDetails = ["captured", "captured_chooser"].includes(item.status);
+  const hasDetails = item.status.startsWith("captured") || item.status === "captured_chooser";
   const row = document.createElement("div");
   row.className = "row " + (hasDetails ? "expandable" : "leaf");
 
@@ -669,6 +922,15 @@ function renderItem(item) {
   meta.textContent = metaParts.join(" · ");
   row.appendChild(meta);
 
+  // ★ case #62: title-mismatch indicator in tree list (sidebar 一眼可识别)
+  if (item._title_mismatch && item._page_header) {
+    const tag = document.createElement("span");
+    tag.style.cssText = "color:#f5a623; font-weight:600; margin-left:6px; font-size:11px;";
+    tag.title = `Screenshot shows: ${item._page_header}`;
+    tag.textContent = `⚠`;
+    row.appendChild(tag);
+  }
+
   li.appendChild(row);
 
   if (hasDetails) {
@@ -679,7 +941,20 @@ function renderItem(item) {
     textsList.className = "texts-list";
     const table = document.createElement("table");
     const findingOriginals = new Set(pathFindings.map(f => f.original));
-    (item.app_texts || []).forEach(t => {
+    // ★ case #61 (2026-05-27): viewer-side dedup — default 用 _dedup_texts(去除祖先 path 重复),
+    // 用户开 "Show all" toggle 时切回 app_texts。toggle 状态存 localStorage,跨刷新保留。
+    const showAllDuplicates = (localStorage.getItem("show_all_duplicates") === "1");
+    const renderTexts = (!showAllDuplicates && item._dedup_texts !== undefined)
+                       ? item._dedup_texts
+                       : (item.app_texts || []);
+    const hiddenN = (!showAllDuplicates && typeof item._hidden_count === "number") ? item._hidden_count : 0;
+    if (hiddenN > 0) {
+      const note = document.createElement("div");
+      note.style.cssText = "font-size:10px; color:#999; padding:3px 8px; font-style:italic;";
+      note.textContent = `(${hiddenN} duplicate text${hiddenN > 1 ? "s" : ""} inherited from parent path — hidden; toggle "Show all" above to reveal)`;
+      textsList.appendChild(note);
+    }
+    renderTexts.forEach(t => {
       const tr = document.createElement("tr");
       const tdT = document.createElement("td");
       tdT.className = "ko";
@@ -692,9 +967,11 @@ function renderItem(item) {
       tr.appendChild(tdT); tr.appendChild(tdC);
       table.appendChild(tr);
     });
-    if (!(item.app_texts || []).length) {
+    if (!renderTexts.length) {
       const em = document.createElement("div"); em.className = "empty";
-      em.textContent = "(no app_texts captured)";
+      em.textContent = hiddenN > 0
+        ? `(all ${hiddenN} texts inherited from parent — none unique to this page)`
+        : "(no app_texts captured)";
       textsList.appendChild(em);
     } else {
       textsList.appendChild(table);
@@ -703,6 +980,14 @@ function renderItem(item) {
 
     const shots = document.createElement("div");
     shots.className = "screenshots";
+    // ★ case #62: title-mismatch warning(screenshot 实际页面跟 click 的 menu 名不符)
+    // 触发场景:RN dump 含父页 ghost items → upfront discovery 误收 → click stale bounds → 跳错页 → 截图内容跟 path 不符
+    if (item._title_mismatch && item._page_header) {
+      const warn = document.createElement("div");
+      warn.style.cssText = "background:#fff3cd; border-left:3px solid #f5a623; color:#856404; padding:6px 10px; margin-bottom:6px; font-size:11px; font-weight:600;";
+      warn.innerHTML = `⚠ Title mismatch: clicked <code>${item.path.split(" > ").pop()}</code> but screenshot shows <code>${item._page_header}</code>. <br><span style="font-weight:normal;font-style:italic;">RN ghost items from Phase A leaked into Phase B; bounds stale → click landed on different page. Audit content is real, but path label is misleading.</span>`;
+      shots.appendChild(warn);
+    }
     if (item._screenshot) {
       const img = document.createElement("img");
       img.dataset.src = item._screenshot;
@@ -724,7 +1009,22 @@ function renderItem(item) {
       });
       shots.appendChild(grid);
     }
-    if (!item._screenshot && !item._faq_screenshots) {
+    // ★ 2026-05-26(case #51):show scroll frames (related-items 长列表滚动抓取)
+    if (item._scroll_screenshots) {
+      const label = document.createElement("div");
+      label.style.fontWeight = "600"; label.style.marginTop = "6px";
+      label.textContent = `Scroll frames (${item._scroll_screenshots.length}):`;
+      shots.appendChild(label);
+      const grid = document.createElement("div"); grid.className = "faq-grid";
+      item._scroll_screenshots.forEach(fn => {
+        const img = document.createElement("img");
+        img.dataset.src = fn; img.loading = "lazy"; img.title = fn;
+        img.onclick = () => window.open(fn, "_blank");
+        grid.appendChild(img);
+      });
+      shots.appendChild(grid);
+    }
+    if (!item._screenshot && !item._faq_screenshots && !item._scroll_screenshots) {
       const em = document.createElement("div"); em.className = "empty";
       em.textContent = "(no screenshot)";
       shots.appendChild(em);
@@ -926,6 +1226,17 @@ function switchDevice(idx) {
 // Wire controls
 document.getElementById("tree-search").addEventListener("input", applyTreeFilters);
 document.getElementById("only-with-findings").addEventListener("change", applyTreeFilters);
+
+// ★ case #61: "Show all duplicates" toggle — controls _dedup_texts vs app_texts rendering
+const showAllCb = document.getElementById("show-all-duplicates");
+if (showAllCb) {
+  showAllCb.checked = (localStorage.getItem("show_all_duplicates") === "1");
+  showAllCb.addEventListener("change", () => {
+    localStorage.setItem("show_all_duplicates", showAllCb.checked ? "1" : "0");
+    // 重新渲染当前 device tab(简单 reload 整页保证一致)
+    location.reload();
+  });
+}
 document.querySelectorAll(".status-filter").forEach(cb => {
   cb.addEventListener("change", e => {
     if (e.target.value === "all" && e.target.checked) {
