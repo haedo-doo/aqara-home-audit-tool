@@ -3,7 +3,7 @@
 Aqara Home Android 앱의 메뉴를 자동 탐색 → AI 번역 검수 → 정적 viewer 생성하는 파이프라인.
 
 - **언어**: 한국어 (이 문서)
-- **개발 문맥 / 엣지케이스 36개**: [CLAUDE.md](CLAUDE.md)
+- **개발 문맥 / 엣지케이스 74개**: [CLAUDE.md](CLAUDE.md)
 - **현재 검증된 규모**: 27 디바이스, 3 언어(ko/zh/en), 1회 audit ≈ ₩4,000 (Gemini 2.5 Pro paid)
 
 ---
@@ -70,6 +70,27 @@ python phase2_traverse.py
 
 #### 옵션
 - `--once`: 1 디바이스만 스캔하고 중단 (디버깅 / FP2 다중 모드 분리 스캔용)
+
+#### FP2 다중 모드 스캔
+
+FP2 (재실 센서)는 모드별로 메뉴 구조가 다름 (region sensing / fall detection / sleep / combined). 모든 모드의 번역을 커버하려면 폰에서 **수동으로 모드를 전환한 뒤 매번** `--once`로 스캔:
+
+```powershell
+# 모드 A로 전환 → 장치 메인 페이지
+python phase2_traverse.py --once
+# → output/traverse_v8_..._/  (이 모드의 menu만 포함)
+
+# 모드 B로 전환 → 다시 실행
+python phase2_traverse.py --once
+
+# (4 모드 다 스캔하면 4 개 output dir 생성)
+```
+
+CLAUDE.md "FP2 multi-mode" 섹션 참고.
+
+#### 느린 폰 (Samsung S8 등)
+
+`phase2_traverse.py` 상단의 `SLOW_DEVICE_MODE = True` 가 기본. 빠른 폰이면 `False`로 바꾸면 스캔 시간 절반.
 
 ### 2.2 3개 언어 스캔 (정확도 ↑, 권장)
 
@@ -179,10 +200,12 @@ ko / zh / en 별 3회         (3언어 비교 + AI)              → viewer.html
 ├── phase3_align_locales.py       # 3언어 정렬 (audit이 import)
 ├── phase3_build_viewer.py        # viewer.html 생성
 ├── phase3_merge_decisions.py     # 번역팀 decisions → corrections.json
+├── phase3_combine_runs.py        # FP2 다중 모드 등 여러 run을 하나로 머지
+├── phase3_glossary_gen.py        # (선택) 고빈도 명사 자동 사전 초안 생성
 ├── corrections.json              # 수정 추적 + ignored 사전 (수동 관리)
 ├── requirements.txt              # Python 의존성
 ├── README.md                     # 이 문서
-├── CLAUDE.md                     # 개발 문맥, 36개 엣지케이스, 미래계획
+├── CLAUDE.md                     # 개발 문맥, 74개 엣지케이스, 미래계획
 ├── output/                       # 모든 스캔 결과 (gitignore됨, 동기화 X)
 └── (선택) probe_*.py, diagnose.py, inspect_xml.py  # 수동 디버그 도구
 ```
@@ -219,16 +242,17 @@ ko / zh / en 별 3회         (3언어 비교 + AI)              → viewer.html
 | 한국어만 audit | ≈ ₩4,876 |
 | 3언어 + 최적화 (현재 기본값) | ≈ ₩3,800 |
 
-- thinking 토큰 (Pro 내부 추론) 포함. 자세한 분석은 [CLAUDE.md](CLAUDE.md) "AI Audit 성본 기준선" 참고.
+- thinking 토큰 (Pro 내부 추론) 포함. 자세한 분석은 [CLAUDE.md](CLAUDE.md) "AI Audit 비용 기준선" 참고.
 - 무료 tier (Flash Lite)는 RPD 20 제한으로 27 디바이스 1회 audit 못 함.
 
 ---
 
 ## 8. 추가 개발 시
 
-- **반드시 [CLAUDE.md](CLAUDE.md)의 "36개 엣지케이스" 먼저 읽기** — 모든 항목이 실제 실패에서 나옴.
+- **반드시 [CLAUDE.md](CLAUDE.md)의 "74개 엣지케이스" 먼저 읽기** — 모든 항목이 실제 실패에서 나옴.
 - 코드 컨벤션은 CLAUDE.md "代码约定" 섹션 참고.
 - 새 디바이스 추가 후 처음 스캔할 때 `phase_b_nav_failed.xml` 또는 무한 루프 발생 가능 — 그 경우 디바이스 main page XML을 분석하여 새 strategy 추가.
+- 새 발견된 "click 후 dialog drift" / "RN inline expansion 오판" 같은 패턴은 우선 `ACTION_BUTTON_EXACT` / `CAPTURE_NO_RECURSE_KEYWORDS` 에 항목 추가로 회피하고, 비슷한 case가 누적되면 heuristic 자체를 손볼 것 (예: case #73의 condition B + items_preserved 가드).
 
 ---
 
